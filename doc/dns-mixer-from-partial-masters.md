@@ -22,8 +22,9 @@ sources:
     competition, but leave it to service providers to deliver the actual `NAPTR`
     records.
 
-Other applications may benefit, including DHCP, Multicast DNS and DNS service in
-peer-to-peer networks, but we focus on these two applications in the sequel.
+Other applications may benefit, including Dynamic DNS, Multicast DNS and DNS
+service in peer-to-peer networks, but we focus on these two applications in the
+sequel.
 
 Implementation
 --------------
@@ -35,9 +36,15 @@ The implementation can be centered around a number of current-day tools:
     addition/removal/querying, and automation of SOA counter regime and DNSSEC
     signing.
 
+-   An alternative output stage could be a hidden master supporting `NOTIFY`,
+    `AXFR` and `IXFR` messages.  Note that an `IXFR` pretty much captures the
+    idea of a transaction, whose commit initiates `NOTIFY` messages.
+
 -   [ldns-zonediff](https://github.com/SURFnet/ldns-zonediff) can be used to
     easily infer changes between zone files, even with Knot DNS statement
-    output.
+    output.  There is also a utility
+    [ldns-mergezone](https://github.com/SURFnet/ldns-mergezone), but that may
+    be too specifically geared towards DNSSEC zone rollovers.
 
 -   [Go DNS](https://github.com/miekg/dns) may be a good basis on which to
     implement the DNS mixer.
@@ -54,11 +61,11 @@ sequence of DNS labels which the DNS mixer will strip from the owner names sent
 by the partial master.
 
 The partial master can follow any policy for zone cut-off boundaries.  It may
-publish one large zone or any number of smaller ones.  The DNS mixer welcomes
-any `NOTIFY` that falls under the partial master’s virtual root and will happily
-send an `IXFR` query for it.  For very large zones, `AXFR` is less desirable.
-Whatever is delivered that way will be filtered through the authorisation rules
-for the partial master.
+publish one large zone or any number of smaller ones.  The DNS mixer is
+configured with these zones, and welcomes any `NOTIFY` that falls under the
+partial master’s virtual root and will happily send an `IXFR` query for it.  For
+very large zones, `AXFR` is less desirable.  Whatever is delivered that way will
+be filtered through the authorisation rules for the partial master.
 
 Even though access control is used to decide which records the DNS mixer will
 forward to its output stage, there is no feedback about this to the partial
@@ -66,10 +73,10 @@ masters.  Data is simply taken in and subjected to access control rules that may
 change without informing the partial master.
 
 Note that `SOA` serial counters are kept for the relationship about zone apexes
-with each partial master, but these records are not forwarded to Knot DNS.
-Instead, any such records are rejected, stored only to allow an `IXFR` request
-in response to a `NOTIFY` message.  These `SOA` serial counters have no meaning
-beyond this relationship between the partial master and the DNS mixer.
+with each partial master, but these records are not forwarded to the output
+stage.  Instead, any such records are rejected, stored only to allow an `IXFR`
+request in response to a `NOTIFY` message.  These `SOA` serial counters have no
+meaning beyond this relationship between the partial master and the DNS mixer.
 
 It is possible, even likely, that multiple DNS mixer nodes redundantly publish
 the data from the partial masters.  This means that the partial master can have
@@ -137,9 +144,8 @@ Access control consists of any number of lines, constraining things like:
 
 -   We shall assume class `IN` alone.
 
--   A resource record type that may be published.  Allow `ANY` as wildcard.
-    Never publish a `SOA` from a partial master.  Support for `A` implies
-    support for `AAAA`, but the opposite is not true.
+-   A resource record type that may be published.  Allow `ANY` as wildcard.  Never
+    publish a `SOA` from a partial master in an output zone.
 
 -   For each resource record type, constraints to some or all fields.  This may
     impose a list of permitted values, but also ranges for numerical fields that
@@ -148,23 +154,23 @@ Access control consists of any number of lines, constraining things like:
 
 The purpose of access control is to make a policy-based split into published and
 rejected resource records; if another partial master already published the same
-resource record data under the same owner name, according to Knot DNS, then a
-reference count must be incremented.  When no rule on the ACL matches a resource
-record, it will be rejected.
+resource record data under the same owner name, according to the output stage,
+then a reference count must be incremented.  When no rule on the ACL matches a
+resource record, it will be rejected.
 
 Before removing a resource record, it is first verified to be present in the
 published or rejected resource records; only if it is in the former will the
-removal be supported.  Before forwarding it to Knot DNS, a check is made if a
-reference count can be decremented to reach 0.
+removal be supported.  Before forwarding it to the output stage, a check is made
+if a reference count can be decremented to reach 0.
 
 When changes are made to access control, the published and rejected resource
 records must be re-evaluated.  The result may move resource records between the
-lists, with corresponding zone data changes forwarded to Knot DNS.  (But it is
-still not permitted to publish data that is already published for another
+lists, with corresponding zone data changes forwarded to the output stage.  (But
+it is still not permitted to publish data that is already published for another
 partial master.)
 
 In general, the published and rejected resource records are committed or aborted
-together with the Knot DNS transactions.
+together with the output stage transactions.
 
 Secure Transfers
 ----------------
@@ -187,9 +193,9 @@ Data Storage
 
 Overal data for the DNS mixer:
 
--   An output stage, such as Knot DNS, with externally controlled zone
-    configuration but zone data other than `SOA` records controlled by the DNS
-    mixer.
+-   An output stage, with externally controlled zone configuration but zone
+    data other than `SOA` records controlled by the DNS mixer and `SOA`
+    treated specially as defined below.
 
 -   A key-value database for Reference Counting.
 
@@ -197,13 +203,20 @@ Overal data for the DNS mixer:
 
 Per partial master:
 
+-   Authenticating client identity
+
+-   IP addresses for name servers
+
 -   Virtual root, and to what this is internally rewritten.
+
+Per partial master’s zone:
 
 -   When known, the last accepted SOA with serial count, to enable `IXFR`
     instead of `AXFR`.
 
--   Access control list in terms of internal owner names, including labels to
-    remove to find the zone apex.
+-   Access control list in terms of internal owner names.  For each, the
+    number of labels to remove from the beginning to find the zone name
+    receiving any changes in the output stage (only when fixed).
 
 -   A set (or multiset) with published zone data.
 
@@ -218,14 +231,16 @@ Procedures
 
 Updates are usually processed as `IXFR` changes, so they combine a number of
 resource record removals and additions into one transaction for each impacted
-zone.  An `AXFR` can be handled like an `IXFR` by first removing anything that
-is currently on the published or rejected lists.
+zone.  An `AXFR` can be handled like an `IXFR` by first removing anything that is
+currently on the published or rejected lists.
 
 Elementary procedures are needed for:
 
 -   Incrementing a Publication Reference Count
 
 -   Decrementing a Publication Reference Count
+
+-   Checking a Resource Record against an ACL
 
 -   Adding a Resource Record
 
@@ -240,14 +255,13 @@ has taken place, but not authorisation.
 
 ### Incrementing a Publication Reference Count
 
-For a resource record `RR`, concealing optimised implementation with absent
+Psuedocode for adding a resource record `RR`.  This conceals an optimisation with absent
 elements when their value is 0:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 inc_pubrefcount (RR) {
-    pubrefcount [RR] += 1;
-    if pubrefcount [RR] == 1 then
-    else
+    pubrefcount [hash (RR)] += 1;
+    if pubrefcount [hash (RR)] == 1 then
         output_add_rr (RR);
     endif
 }
@@ -255,15 +269,30 @@ inc_pubrefcount (RR) {
 
 ### Decrementing a Publication Reference Count
 
-For a resource record `RR`, concealing optimised implementation with absent
+Psuedocode for deleting a resource record `RR`.  This conceals an optimisation with absent
 elements when their value is 0:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 dec_pubrefcount (RR) {
-    if pubrefcount [RR] == 1 then
+    if pubrefcount [hash (RR)] == 1 then
         output_del_rr (RR);
     endif
-    pubrefcount [RR] -= 1;
+    pubrefcount [hash (RR)] -= 1;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+### Checking a Resource Record against an ACL
+
+Pseudocode for checking if the ACL for partial master `PM` accepts resource record `RR`:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+acl_ok (PM,RR) {
+    foreach AR in list_acl (PM) do
+        if acl_match (AR,RR) then
+            return true
+        endif
+    endfor
+    return false
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -273,11 +302,11 @@ Pseudocode acting for a partial master `PM` on a resource record `RR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 add_rr (PM,RR) {
-    if not acl_ok (PM,RR) then
-        append_rejected (PM,RR);
-    else
+    if acl_ok (PM,RR) then
         append_published (PM,RR);
         inc_pubrefcount (RR);
+    else
+        append_rejected (PM,RR);
     endif
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -288,11 +317,11 @@ Pseudocode acting for a partial master `PM` on a resource record `RR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 del_rr (PM,RR) {
-    if not acl_ok (PM,RR) then
-        remove_rejected (PM,RR);
-    else
+    if acl_ok (PM,RR) then
         remove_published (PM,RR);
         dec_pubrefcount (RR);
+    else
+        remove_rejected (PM,RR);
     endif
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -304,12 +333,13 @@ Pseudocode acting for a partial master `PM` on an ACL rule `AR`:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 add_acl_rule (PM,AR) {
     foreach RR in list_rejected (PM) do
-        if acl_match (AR, RR) then
+        if acl_match (AR,RR) then
             remove_rejected (PM,RR);
             append_published (PM,RR);
             inc_pubrefcount (RR);
         endif
     endfor
+    append_acl (PM,AR);
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -319,11 +349,12 @@ Pseudocode acting for a partial master `PM` on an ACL rule `AR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 del_acl_rule (PM,AR) {
+    remove_acl (PM,AR);
     foreach RR in list_accepted (PM) {
-        if acl_match (AR, RR) then
+        if acl_match (AR,RR) then
             drop := true;
             foreach AR2 in list_acl (PM) do
-                if acl_match (AR2, RR) then
+                if acl_match (AR2,RR) then
                     drop := false;
                 endif
             endfor
@@ -351,8 +382,12 @@ There are a few constraints to using this service properly.
 -   Note that local zones too can be fed to the DNS mixer from an (internal)
     partial master.
 
--   We should integrate a Pulley Backend to add and remove ACL rules.  This
-    means that the API needed for ACL rule changes needs rules to add and remove
+There is also some need to facilitate external processes.
+
+-   We should integrate a Pulley Backend to add and remove ACL rules.  This means
+    that the API needed for ACL rule changes needs rules to add and remove
     tuples of zone, sublabels, and a formal text with further constraints to
-    elements.  The API must support a transactional context for such ACL
-    changes.
+    elements.  The API must support a transactional context for such ACL changes.
+
+-   We need to add and remove output zones as well as partial masters and
+    partial masters' zones.
