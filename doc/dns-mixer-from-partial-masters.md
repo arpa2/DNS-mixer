@@ -7,24 +7,18 @@ Mixing partial DNS zones
 >   data that an authenticated partial master may publish.  Zones output by the
 >   DNS mixer integrate content from any number of partial masters.*
 
-There are at least two applications for mixing DNS zone data from various
-sources:
+This document describes a new kind of software, described as "DNS mixers",
+which basically does the following:
 
--   Domain owners often need to setup records in DNS if they want to add a
-    service.  For external services, this is currently done mostly by hand, in
-    practice leading to static configurations.  With a DNS mixer, the resource
-    data can be dynamically provided by the external service itself, under
-    constraints that avoid overtaking the entire zone.
+ 1. Download zone data from any number of partial masters
+ 2. Split the data for each partial master into published and rejected data
+ 3. Possibly modify the published data for the partial master
+ 4. Send the union of (modified) published data to a DNS output stage
 
--   Public User ENUM currently relies on users editing their zones.  With a DNS
-    mixer, users only need to regulate which parties may provide what kind of
-    ENUM applications, with occassional priority/weight settings to resolve
-    competition, but leave it to service providers to deliver the actual `NAPTR`
-    records.
-
-Other applications may benefit, including Dynamic DNS, Multicast DNS and DNS
-service in peer-to-peer networks, but we focus on these two applications in the
-sequel.
+The process is dynamic; zone data may be added or removed by partial masters,
+and the split between its published and rejected data, as well as rewrites,
+can be modified which calls for recomputation.  The descriptions below aim
+to only change what might actually change.
 
 Implementation
 --------------
@@ -39,6 +33,10 @@ The implementation can be centered around a number of current-day tools:
 -   An alternative output stage could be a hidden master supporting `NOTIFY`,
     `AXFR` and `IXFR` messages.  Note that an `IXFR` pretty much captures the
     idea of a transaction, whose commit initiates `NOTIFY` messages.
+
+-   Yet another output stage (should it be pluggable?) would be one that
+    sends the complete DNS zone data over RabbitMQ.  And an empty string
+    to indicate its absense or removal.
 
 -   [ldns-zonediff](https://github.com/SURFnet/ldns-zonediff) can be used to
     easily infer changes between zone files, even with Knot DNS statement

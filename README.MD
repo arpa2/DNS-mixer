@@ -43,3 +43,10 @@ DNS mixer:
     a good idea in such networks, except that NSEC and NSEC3 are unlikely
     to work, so timeouts may slow down the network operation.
 
+  * Migrations between DNSSEC signing solutions, such as the crossover between
+    DNS service providers or changing from one HSM-based signer to another.
+    Special precautions are needed to do this, such as the introduction of the
+    zone public keys from one side to the other side, but these tasks as well
+    as the delivery of the signed output from old and new situation may well
+    be setup with a DNS mixer.
+
