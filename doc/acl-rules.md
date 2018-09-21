@@ -19,11 +19,16 @@ Changes to the ACL may recalculate these conditions without change to
 the resource records.
 
 An ACL Rule is a sequence of separate field matches, separated by
-semicolons.  Spaces at the beginning and end of a partial field is
-ignored, and sequence of multiple spaces and/or tabs is treated like
-a single space.  The first entry is for the owner name, the second
-for the resource record type and any further entries are for
-resource data fields.  Missing fields are implictly matched.
+semicolons.  Each field consists of a field type name and an optional
+set of constraining parameters.  Spaces and tabs are generously
+permitted to improve readability.
+
+Usually, a field is matched against a `name` and a `type` and any
+resource data fields that may be desired.  It is a bad idea to
+match resource data fields without having checked the `type` and
+that may in fact be refused.  On the other hand, just matching the
+`name` and not constraining the `type` or resource data would be
+no problem, and has clearly defined semantics.
 
 As an introductory example, an ACL Rule to allow `www.example.com`
 with type `AAAA` and any address would look like
@@ -180,26 +185,77 @@ exceptions that should never pass, we write
 
     type
 
-To require a certain resource record type, we add its name and write
+To require a certain resource record type, we add its name or the
+equivalent number and write
 
     type MX
+    type 15
 
-It would be an error to specify `SOA` or `ANY` as a type, and a
-few others might also be banned.  It may be useful to specify
+It would be an error to specify `SOA` as a type, and `ANY` is not
+specified in this place; in addition, a few others like `AXFR`
+and `IXFR` may have to be banned.  It may be useful to specify
 DNSSEC types however, for special circumstances such as the
 migration of a zone between signers or between hosting providers.
 
-There currently are no further words to add to the `type` field.
-This may be a place for some further work, notably to map a
-`DNSKEY` record to a `DS` record.  The output may then be fed
-into a parent zone.  Similarly, mappings from `CDNSKEY` and `CDS`
-to `DNSKEY` and/or `DS` could make sense.  Plus, the `NS` records
-might be fed from child to parent using the same path.
+Additional words can be added to the `type` field and would indicate
+a mapping from one type to possibly another.  These mappings would
+be implemented in a dynamically loadable library, taking in a
+resource record and making callbacks to insert zero, one or more
+resource records for further processing.  These functions would
+be setup with prepared arguments based on the parameters given after
+the `type` field type and its first argument.
 
+For example, one might state that a `DNSKEY` record is to be mapped
+to SHA-256 with a statement like
+
+    type DNSKEY key2ds 2
+
+An underlying loadable library would define a name `key2ds` that
+processes accordingly.  Fixed parameters supplied are the numeric
+resource record type plus strings in `argc` and `argv` style,
+`"key2ds"` and `"2"`.  These parameters pass into a preparation
+(or "compiler") function, which outputs an opaque pointer that
+is subsequently passed into an actual runtime (or "workhorse")
+function.  This runtime function is provided with the actual
+resource record that is being mapped, together with a callback
+function where it can deliver the resource record, without
+knowing whether this would be added or removed by that function.
+Any other fields that may be modified are updated before this
+function is called.
+
+Note that no restrictions on the algorithms and such need to be
+made here; the remainder of the ACL Rule can be used to express
+those.
+
+The same function name may be used for more than one resource
+record type, for example the same function as before might also
+be applied for
+
+    type CDNSKEY key2ds 2
+
+While literal changes from child to parent form could be done
+with
+
+    type CDNSKEY child2parent
+    type CDS     child2parent
+
+These are only examples however; the actual work would be done
+in the plugin mechanism.
+
+**TODO:** Is the `type` field the best location for such
+mapper functions?  We might also allow an optional filter
+at the end, with `map` virtual fields.  A sequence of filters
+might even be used for that purpose.
+
+**TODO:** Instead of the plugin library mechanism, we might
+also define an abstract class that can be specialised and
+compiled in.  There won't be too many operations to support
+anyway.
 
 ## Integers
 
-Many fields in DNS are integers, and often simply 16 bits unsigned.
+Many fields in DNS are integers, and often simply 16 bits unsigned
+represented on the wire in network byte order (or big endian).
 These are written as `u16` but other forms, such as `u128` for 128-bit
 unsigned IPv6 addresses are also allowed, or to give a list,
 
@@ -293,9 +349,11 @@ combination `+3 9-12` is the same as `6-9 +3`, the sequence
 `_3 6-*` is the same as `6-* _3` and `^87 66-99` is the same
 as `^87 66-87` and `66-* ^87` forms.
 
-Note that the various forms may be combined, as in
+Note that the various forms may be combined to list a number of
+alternative choices in different forms, as in
 
     u16 e000&ff00 6-13 +7 13-20
+
 
 ## Byte sequences
 
@@ -359,6 +417,131 @@ This would match `TXT "hello" "world"` but not `TXT "one"
 Without the `end` added here, only the latter form would have
 been rejected.
 
+
+## Class
+
+This field represents the class of a resource record, usually
+`IN` for the common Internet naming scheme.  In fact, the only
+other class in some use is `CHAOS` for name server identity.
+These two names can be literally used as a field type name,
+without further requirements,
+
+    in
+    chaos
+
+Except for their parsing behaviour, these forms are equivalent
+to, respectively,
+
+    u16 1
+    u16 3
+
+
+## Time To Live
+
+This field represents a time to live or TTL, which is equivalent to
+a 32-bit unsigned integer `u32`, but written as
+
+    ttl
+
+The constraints and modifications to lower and higher values are
+all supported.  When nothing is mentioned, the range is constrained
+to reasonable default extremes of an hour and a week,
+
+    ttl _3600 ^604800
+
+When no constraint is applied to the TTL by not mentioning the `ttl`
+field at all, then these same defaults are applied.
+
+Different TTL values could arrive in the same resource record set,
+as identified by their label, class and type.  This is not intended,
+so a resolution is needed to implement the deprecation of this value
+in Section 5.2 of RFC 2181.
+
+
+## Resource Data Length
+
+This field represents the number of bytes in the resource data
+as it travels over the wire.  Although not usually needed, there may
+be a use for matching or explicitly skipping it, which is easy
+because it is equivalent to `u16`, but written as
+
+    rdlen
+
+The constraints to lower and higher values, as well as fixed values,
+are all supported.  There is no constraint to restrict the default
+case, but one might require things like
+
+    rdlen 16
+    rdlen 16-32
+
+Changes to the value of this field are not supported.
+
+
+## Complete Resource Records
+
+Under the assumption that the grammar given here translates to some
+underlying format, it is desirable to completely match resource
+records; this is why forms were introduced for `ttl` and `rdlen`,
+as well as the `in` and `chaos` classes, along with common defaults
+and a translation to simple `u16` and `u32` matches.
+
+The format of a resource record is as follows:
+
+                                    1  1  1  1  1  1
+      0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    |                                               |
+    /                                               /
+    /                      NAME                     /
+    |                                               |
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    |                      TYPE                     |
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    |                     CLASS                     |
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    |                      TTL                      |
+    |                                               |
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    |                   RDLENGTH                    |
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--|
+    /                     RDATA                     /
+    /                                               /
+    +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+Clearly, the full sequence for matching this form is `name`, `type`,
+`in` or `chaos`, `ttl`, `rdlen` and specific resource data fields.
+A compiler for the ACL Rule format can arrange simpler instructions,
+mostly `name`, `u16` and `u32` forms, with desired behaviours.
+
+Considering the introductory example,
+
+    name www.example.com. ; type AAAA ; u128 2000::&3000::
+
+This would make good use of the field type names to recognise the
+absent fields for class, TTL and resource data length, and insert
+their defaults.  Effectively, the translation would be for
+
+    name www.example.com. ; type AAAA ; in ; ttl _3600 ^604800 ; rdlen ; u128 2000::&3000::
+
+Now that all fields have been written out, the syntactical sugar
+can be remove to arrive at
+
+    name www.example.com. ; u16 28 ; u16 1 ; u32 _3600 ^604800 ; u16 ; u16 2000&3000
+
+This simpler form should be easy to handle, or it may be further
+reduced to a byte code that could be processed lightning fast by a
+filter inside the DNS mixer.  The need to parse the DNS data would
+be dramatically simplified, most notably because no knowledge of the
+various resource data formats is required in such a filter.
+
+The result of localising this knowledge in a syntax-processing phase
+for ACL Rules is that the DNS mixer itself need not be aware of the
+format of any of the Resource Records!  It only needs to handle the
+field types described herein (and just add field types when they are
+desired by new resource data definitions) 
+
+**TODO:** Check that all current field types are indeed covered!
+
 ## Example: NSEC3 passthru
 
 Only in special cases is it useful
@@ -385,6 +568,7 @@ requirements would be
 
 We can further restrict the fields by adding recognisable
 values behind their names.
+
 
 ## Example: SRV with offsetting
 

@@ -139,11 +139,20 @@ Access control consists of any number of lines, constraining things like:
 -   The zone for the given owner name.
 
 -   We shall work with a fixed TTL setting.
+    **TODO:** An alternative, preliminarily specified as part of the ACL Rules,
+    is to grant TTL specification and range limiting; when combining resource
+    records from different partial masters into one output zone, various TTL
+    values come together and may be different.  These must be matched to one
+    value including applying to all the resource records; this may however be
+    deferred to a DNSSEC signer which may take care of it already.
 
 -   We shall assume class `IN` alone.
+    **TODO:** In the ACL Rules specification, we can include this as a default
+    that is implicitly added while compiling the rules.  The benefit is that the
+    complete resource record can be matched against the ACL Rule in one go.
 
--   A resource record type that may be published.  Allow `ANY` as wildcard.  Never
-    publish a `SOA` from a partial master in an output zone.
+-   A resource record type that may be published.  Allow a wildcard form.  Never
+    publish a `SOA`, `IXFR` or `AXFR` from a partial master in an output zone.
 
 -   For each resource record type, constraints to some or all fields.  This may
     impose a list of permitted values, but also ranges for numerical fields that
@@ -198,6 +207,8 @@ Overal data for the DNS mixer:
 -   A key-value database for Reference Counting.
 
 -   The TTL value to apply to all resource records in the output stage.
+    **TODO:** This is now suggested to be removed and instead allowed some
+    expression in ACL Rules, but with sane defaults so it is not required.
 
 Per partial master:
 
@@ -214,15 +225,15 @@ Per partial master’s zone:
 
 -   Access control list in terms of internal owner names.  For each, the
     number of labels to remove from the beginning to find the zone name
-    receiving any changes in the output stage (only when fixed).
+    receiving any changes in the output stage (when known).
 
--   A set (or multiset) with published zone data.
+-   A set (or multiset) with published resource records.
 
--   A set (or multiset) with rejected zone data.
+-   A set (or multiset) with rejected resource records.
 
 Per output zone:
 
--   Nothing, really.  The output stage handles that.
+-   Nothing, really.  The (pluggable?) output stage handles that.
 
 Procedures
 ----------
@@ -264,6 +275,10 @@ inc_pubrefcount (RR) {
     endif
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**TODO:** Not implemented here is what to do with different TTL values under the same
+owner name and resource record type.  The values then need to be aligned, if this is
+not done by later phases of DNS handing.
 
 ### Decrementing a Publication Reference Count
 
