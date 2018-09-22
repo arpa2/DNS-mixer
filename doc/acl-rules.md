@@ -13,8 +13,9 @@ regular language, meaning that it is fit for a lexical scanner, but
 without nested structures there is no need for a stack-based parser.
 
 An ACL Rule will approve of a resource record when it matches.  When no
-ACL Rule matches, a resource record is rejected.  There is no notation
-(yet) for ACL Rules that reject forms that may otherwise be accepted.
+ACL Rule matches, a resource record is not published.  There is no notation
+for ACL Rules that suppress forms that would otherwise be accepted; the
+entire pathway for resource records is constructive in nature.
 Changes to the ACL may recalculate these conditions without change to
 the resource records.
 
@@ -71,18 +72,25 @@ names are not fully qualified, the implicit addition is `@` as in
 the form above.  See below for implications this has on matching
 and modifying zone names.
 
+The use of `_` at the end of a name has a special meaning; it
+represents any delegation point to domain owners under a
+top-level domein, such as `nl` or `co.jp`,
+
+    name example._
+    name **._
+
 Names may start with a wildcard to match any concrete name supplied
 by the resource record but not the wildcard itself,
 
-    name *.people.example.com.
-    name *.people.@
+    name **.people.example.com.
+    name **.people.@
 
 To also allow the wildcard in this position, explicitly specify it in
 an extra Rule, using two asterisks in the place that will match the
 wildcard and only the wildcard,
 
-    name **.people.example.com.
-    name **.people.@
+    name *.people.example.com.
+    name *.people.@
 
 The root zone `.` is defined with a special meaning in various
 places, such as the `RP` and `SRV` record types.  To match it, use
@@ -92,7 +100,7 @@ places, such as the `RP` and `SRV` record types.  To match it, use
 However to match anything but this form, we need more.  We shall
 write that with the form
 
-    name *.
+    name **.
 
 Now consider labels in the name to be numbered from 0 for the top-level,
 incrementing by one for each label underneath.  Using these numbers, we
@@ -106,21 +114,24 @@ As a special note, when the `@` label is used in the name description,
 it counts as a single label (because it is unfolded after the
 application of the ACL Rule mapping and just before matching names
 as part of the application of the ACL Rule).  The label may occur
-in any position, not just at the top.  The notation `**` represents a
+in any position, not just at the top.
+Even though `_` as the last label in a name can match one or two labels
+such as for `org` or `co.uk`, it is always counted as one label.
+The notation `*` represents a
 literal asterisk in the zone data, so it too counts as a single label.
-This is not the case for the `*` label, which may cover multiple levels
+This is not the case for the `**` label, which may cover multiple levels
 of labels which are then separately counted.
 
 We can filter out names with a given number of levels, with things like
 
-    name *.com. 2
-    name *.uk. 2-3
-    name *.jp. 3-*
+    name **.com. 2
+    name **.uk. 2-3
+    name **.jp. 3-*
 
 Note that the following forms are equivalent,
 
-    name *.
-    name *. 1-*
+    name **.
+    name **. 1-*
 
 We can clip the name from the top at a given label, effectively removing
 the given number of top-most labels, with
@@ -133,21 +144,25 @@ to find the name of the targeted output zone,
     name www.example.com. =2
     name www.example.com.local. -1 =2
 
+Note that this is generally useful for efficiency of the output stage,
+but it also empowers an explicit selection of the output zone, including
+a differentiation between child and parent zones.
+
 We can clip the name at the bottom label number to constrain the number
 of levels that may pass to the given number plus one, with
 
-    name *.people.example.com. ^3
+    name **.people.example.com. ^3
 
 This is a syntactical operation, so the following makes no sense:
 
     # Silly because ^3 passes the name with the wildcard:
-    name **.people.example.com. ^3
+    name *.people.example.com. ^3
 
 We can add one or more labels on the top (or low-label-number) end,
 perhaps after removing another top end, using a name prefixed with a dot,
 
-    name *.example.com. -2 .example.org.
-    name *.example.com. -2 .@
+    name **.example.com. -2 .example.org.
+    name **.example.com. -2 .@
 
 We can add a label on the bottom (or high-label) end, perhaps after removing another label,
 for instance to change `www.example.com` into `my.example.com`,
@@ -166,7 +181,7 @@ time.  Future versions of the DNS mixer may report errors when a potential clash
 between ACL Rules that are being loaded.  Better even, an indepenent analysis tool may be
 used to support operators with a separate test, possibly integrated with zone monitoring.
 
-Modified names are not stored in the lists of published or rejected resource records for
+Modified names are not stored in the input lists of resource records for
 any of the partial masters' zones.  The mapping of names, and especially of owner names,
 determines how the name server will publish the information.  Since updates to ACL Rules
 will be reflected in updates to published zone data, this forms a nice mechanism to move
@@ -208,30 +223,22 @@ the `type` field type and its first argument.
 For example, one might state that a `DNSKEY` record is to be mapped
 to SHA-256 with a statement like
 
-    type DNSKEY key2ds 2
+    type DNSKEY dnskey2ds 2
 
-An underlying loadable library would define a name `key2ds` that
-processes accordingly.  Fixed parameters supplied are the numeric
-resource record type plus strings in `argc` and `argv` style,
-`"key2ds"` and `"2"`.  These parameters pass into a preparation
-(or "compiler") function, which outputs an opaque pointer that
-is subsequently passed into an actual runtime (or "workhorse")
-function.  This runtime function is provided with the actual
-resource record that is being mapped, together with a callback
-function where it can deliver the resource record, without
-knowing whether this would be added or removed by that function.
-Any other fields that may be modified are updated before this
-function is called.
-
-Note that no restrictions on the algorithms and such need to be
-made here; the remainder of the ACL Rule can be used to express
-those.
+The name `key2ds` represents a special operation, of which the
+tool can support a few that make sense to mainstream applications
+of the DNS mixer.  Some of these are mentioned in the
+[README](https://github.com/arpa2/DNS-mixer)
+for this project, others may follow later.  The extra words are
+static textual parameters to the function.  Usually, these
+functions are applied after the rest of the ACL Rule has been
+applied, including changes to values.
 
 The same function name may be used for more than one resource
 record type, for example the same function as before might also
 be applied for
 
-    type CDNSKEY key2ds 2
+    type CDNSKEY dnskey2ds 2
 
 While literal changes from child to parent form could be done
 with
@@ -239,18 +246,15 @@ with
     type CDNSKEY child2parent
     type CDS     child2parent
 
-These are only examples however; the actual work would be done
-in the plugin mechanism.
+These however, are only examples of what the general mechanism
+would support.  The specific example of `CDS` and `CDNSKEY`
+records is more complex, because these records request an
+update from the parent, rather than being lasting expressions
+of keying like the `DNSKEY` is.  This means that there may be
+a need for some related storage, and possibly even inquiries
+into the current DNS state of the parent zone.  Similar
+update-propagating behaviours can also be found in Multicast DNS.
 
-**TODO:** Is the `type` field the best location for such
-mapper functions?  We might also allow an optional filter
-at the end, with `map` virtual fields.  A sequence of filters
-might even be used for that purpose.
-
-**TODO:** Instead of the plugin library mechanism, we might
-also define an abstract class that can be specialised and
-compiled in.  There won't be too many operations to support
-anyway.
 
 ## Integers
 
@@ -324,7 +328,7 @@ To match a locally used prefix `2001:db8:1234::/48`, use one of
     u128 2001:db8:1234:0&ffff:ffff:ffff:0
     u128 2001:db8:1234::&ffff:ffff:ffff::
 
-We can add or subtract an offset, causing rejecting on overflow,
+We can add or subtract an offset, suppressing publication on overflow,
 applicable to any following statements, using the respective forms
 
     u16 +3
@@ -414,8 +418,8 @@ limit the resource data to two fields only, using
 This would match `TXT "hello" "world"` but not `TXT "one"
 "microsoft" "way"` due to its use of three strings and not
 `TXT "stranded on mercury"` due to its use of a single string.
-Without the `end` added here, only the latter form would have
-been rejected.
+Without the `end` added here, only the latter form would not have
+been published.
 
 
 ## Class
@@ -588,10 +592,10 @@ The fields of the resource data of an SRV record hold:
 Let's say that we will welcome an LDAP record at a priority in the
 range from 10, topping it at 20, and that the weight will be set to
 35.  We shall pass the port only if it is 389 only.  We may want to
-reject records that explicitly state absense of service.  All this
+suppress records that explicitly state absense of service.  All this
 can be done with
 
-    name _ldap._tcp ; type SRV ; u16 +10 ^20 ; u16 =35 ; u16 389 ; name *.
+    name _ldap._tcp ; type SRV ; u16 +10 ^20 ; u16 =35 ; u16 389 ; name **.
 
 A slave service provider may offer a priority 10, weight 0 server
 that we shall setup as our load-balanced alternative with weight
@@ -599,8 +603,8 @@ that we shall setup as our load-balanced alternative with weight
 that will be our fallback of last resort (at priority 30 and
 beyond).  We can use these two ACL Rules to achieve our wishes:
 
-    name _ldap._tcp ; type SRV ; u16 10-20    ; u16 0 =50 ; u16 389 ; name *.
-    name _ldap._tcp ; type SRV ; u16 99-* -69 ; u16       ; u16 389 ; name *.
+    name _ldap._tcp ; type SRV ; u16 10-20    ; u16 0 =50 ; u16 389 ; name **.
+    name _ldap._tcp ; type SRV ; u16 99-* -69 ; u16       ; u16 389 ; name **.
 
 These two Rules may be setup for a completely different partial
 master than the original single one.  This allows us to have a

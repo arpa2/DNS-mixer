@@ -11,41 +11,14 @@ This document describes a new kind of software, described as "DNS mixers",
 which basically does the following:
 
  1. Download zone data from any number of partial masters
- 2. Split the data for each partial master into published and rejected data
- 3. Possibly modify the published data for the partial master
- 4. Send the union of (modified) published data to a DNS output stage
+ 2. Pass this input data through (modding) ACLs to produce output zone data
+ 3. Supply the union of published zone data to a DNS output stage
 
 The process is dynamic; zone data may be added or removed by partial masters,
-and the split between its published and rejected data, as well as rewrites,
-can be modified which calls for recomputation.  The descriptions below aim
-to only change what might actually change.
+as well as  the ACL that maps it to output data, can be modified and lead
+to recomputation.  The description below aims to only process changes for such
+adaptions.
 
-Implementation
---------------
-
-The implementation can be centered around a number of current-day tools:
-
--   [Knot DNS](https://www.knot-dns.cz) can be used as the output stage of the
-    DNS mixer.  It offers a transactional commandline with resource data
-    addition/removal/querying, and automation of SOA counter regime and DNSSEC
-    signing.
-
--   An alternative output stage could be a hidden master supporting `NOTIFY`,
-    `AXFR` and `IXFR` messages.  Note that an `IXFR` pretty much captures the
-    idea of a transaction, whose commit initiates `NOTIFY` messages.
-
--   Yet another output stage (should it be pluggable?) would be one that
-    sends the complete DNS zone data over RabbitMQ.  And an empty string
-    to indicate its absense or removal.
-
--   [ldns-zonediff](https://github.com/SURFnet/ldns-zonediff) can be used to
-    easily infer changes between zone files, even with Knot DNS statement
-    output.  There is also a utility
-    [ldns-mergezone](https://github.com/SURFnet/ldns-mergezone), but that may
-    be too specifically geared towards DNSSEC zone rollovers.
-
--   [Go DNS](https://github.com/miekg/dns) may be a good basis on which to
-    implement the DNS mixer.
 
 Bulk Data Management
 --------------------
@@ -89,8 +62,9 @@ its backend, to constrain the risk.  Other approaches include locking zones all
 at the same time, and/or in a particular order, with back-off on failure to lock
 a zone.
 
-The case for Reference Counting
--------------------------------
+
+The case for Multisets in the Output Stage
+------------------------------------------
 
 The same output data (defined by owner name, resource record type and resource
 record data) should not be supplied by more than one partial master.  Our model
@@ -98,20 +72,28 @@ however, includes cases where competing service providers send in data, and it
 should not be beneficial to publish and retract data that is also published by
 competitors, to make it flap in the output.
 
-This means (sigh) that we need to count how many publications have been made of
-the same output data.  We might actually hash the canonical output data for
-storage simplicity.  On the bright side, we now have an interface over which we
-can query whether a record is already in the output stage, so we need not ask
-for its idea about that.  We can simply add it to the output when the use count
-goes from 0 to 1, or remove it when it goes from 1 to 0.
+This means (sigh) that we need to keep track of how many publications have
+been made of the same output data.  We can do this by producing a multiset
+of resource records in the output stage.  When producing output, multiples
+will be combined into one entry.  We should be exceptionally careful about
+`IXFR` computations, which may only add a resource record when its count
+goes from 0 to >0 instances, and only remove it when its count drops from
+>0 back to 0 instances.
 
-We should be clear on any attempts by partial masters to repeatedly upload the
-same combination, and what its impact is on reference counting and local
-storage.  The reference counting regime may actually lead to simpler
-implementations elsewhere, by supporting multisets (through lists).
+While producing a set of resource records as output from a zone's multiset,
+differing TTL values for the same owner name and resource record type can
+be reduced to the lowest value.  Note that this leads to some complexity
+during the calculation of `IXFR` messages; an added resource record may
+reduce the TTL just like the removal of a resource record may increase the
+TTL.  This would cause the retraction of resource records on account of
+their previous TTL, and their immediate republication with another TTL.
+This complexity only unfolds during differential computing; the effort
+of this efficiency disappears when simply computing the old and new zone
+data and comparing them to produce an `IXFR` message.
 
-Access Control
---------------
+
+Access Control and Resource Record Mapping
+------------------------------------------
 
 There are a few rules to manage in the DNS mixer:
 
@@ -120,8 +102,7 @@ There are a few rules to manage in the DNS mixer:
 
 -   Access control may match, overrule or constrain the individual data fields.
 
--   When access control changes, this may lead to a different split of what is
-    published and what is rejected.
+-   When access control changes, this may lead to different output zone data.
 
 -   No partial master may forward resource data to the output stage if it is
     already published there.
@@ -138,18 +119,14 @@ Access control consists of any number of lines, constraining things like:
 
 -   The zone for the given owner name.
 
--   We shall work with a fixed TTL setting.
-    **TODO:** An alternative, preliminarily specified as part of the ACL Rules,
-    is to grant TTL specification and range limiting; when combining resource
-    records from different partial masters into one output zone, various TTL
-    values come together and may be different.  These must be matched to one
-    value including applying to all the resource records; this may however be
-    deferred to a DNSSEC signer which may take care of it already.
+-   TTL settings are bounded to sane extremes by default; these may be
+    overridden explicitly.  When resource records arrive from different
+    partial masters they may request different TTL values for the same
+    owner name and resource record type; in such cases, the lowest value
+    is used for all the resource records involved.
 
--   We shall assume class `IN` alone.
-    **TODO:** In the ACL Rules specification, we can include this as a default
-    that is implicitly added while compiling the rules.  The benefit is that the
-    complete resource record can be matched against the ACL Rule in one go.
+-   By default, we assume class `IN`, but there is a way to express class `CH`
+    in ACL Rules.
 
 -   A resource record type that may be published.  Allow a wildcard form.  Never
     publish a `SOA`, `IXFR` or `AXFR` from a partial master in an output zone.
@@ -159,25 +136,31 @@ Access control consists of any number of lines, constraining things like:
     are then modified by offsetting for minimum values and capping or rejection
     for maximum values.
 
-The purpose of access control is to make a policy-based split into published and
-rejected resource records; if another partial master already published the same
-resource record data under the same owner name, according to the output stage,
-then a reference count must be incremented.  When no rule on the ACL matches a
-resource record, it will be rejected.
+Though access control imposes a constraint on what resource records may pass
+from the input zone to one or more output zones, there is an added facility of
+modifying the resource records while in transit.  It is even possible to
+produce multiple resource records, perhaps in different zones, as a result of
+ACL processing.  Individual ACL Rules would produce zero or one output
+resource record, but the ACL as a whole produces a multiset of resource records,
+possibly specifying a zone to which each may be assigned.  Note that the zone
+specification can speed up the detection of the output zone, but it may also
+be used to distinguish a parent and child zone where the zone apex is concerned.
 
-Before removing a resource record, it is first verified to be present in the
-published or rejected resource records; only if it is in the former will the
-removal be supported.  Before forwarding it to the output stage, a check is made
-if a reference count can be decremented to reach 0.
+Before removing a resource record, it is passed through the ACL once more, with
+the intent to produce the same output, so it may be retracted.  Since the output
+for each zone is maintained as a multiset of resource records, the removal of
+one resource record from one partial master would not cause the removal of the
+output resource data if it is still supported by another partial master.
 
-When changes are made to access control, the published and rejected resource
-records must be re-evaluated.  The result may move resource records between the
-lists, with corresponding zone data changes forwarded to the output stage.  (But
-it is still not permitted to publish data that is already published for another
-partial master.)
+When changes are made to access control for a partial master's zone, then all
+resource records in that zone must be re-evaluated.  The removal of an ACL Rule
+causes the removal of any produced records from their targeted output zones; the
+addition of an ACL Rule causes appending any produced records to their targeted
+output zones.
 
-In general, the published and rejected resource records are committed or aborted
-together with the output stage transactions.
+In general, changes to the input and output zones and the ACLs for partial master
+zones are committed or aborted together with the output stage transactions.
+
 
 Secure Transfers
 ----------------
@@ -195,6 +178,7 @@ providing an authenticated client identity as a basis for authorisation.
 Other projects and future developments are bound to ask for more than Kerberos
 as a `TSIG` mechanism, so when it is trivial to add, we should include it.
 
+
 Data Storage
 ------------
 
@@ -205,10 +189,6 @@ Overal data for the DNS mixer:
     treated specially as defined below.
 
 -   A key-value database for Reference Counting.
-
--   The TTL value to apply to all resource records in the output stage.
-    **TODO:** This is now suggested to be removed and instead allowed some
-    expression in ACL Rules, but with sane defaults so it is not required.
 
 Per partial master:
 
@@ -221,35 +201,45 @@ Per partial master:
 Per partial master’s zone:
 
 -   When known, the last accepted SOA with serial count, to enable `IXFR`
-    instead of `AXFR`.
+    instead of `AXFR`.  Alternatively, move this over to the output zone.
 
 -   Access control list in terms of internal owner names.  For each, the
     number of labels to remove from the beginning to find the zone name
     receiving any changes in the output stage (when known).
 
--   A set (or multiset) with published resource records.
-
--   A set (or multiset) with rejected resource records.
+-   A multiset with resource records processed as input from the master zone.
 
 Per output zone:
 
--   Nothing, really.  The (pluggable?) output stage handles that.
+-   A multiset of resource records for each zone.
+
+-   The last published SOA with serial count.
+
+-   Historic information from which to infer `IXFR` data, or the resulting
+    `IXFR` data itself.
+
 
 Procedures
 ----------
 
-Updates are usually processed as `IXFR` changes, so they combine a number of
+Updates from partial masters are usually processed as `IXFR` changes, so they combine a number of
 resource record removals and additions into one transaction for each impacted
-zone.  An `AXFR` can be handled like an `IXFR` by first removing anything that is
-currently on the published or rejected lists.
+zone.  An `AXFR` can be handled like an `IXFR` by first removing any resource record that was
+hitherto in the partial master's zone.  As long as these removals and additions are all
+done in one transaction, the result for the output zones should be consistent.
+
+Output zones could be added automatically when ACL processing demands a specific
+output zone.  This avoids dropping records that may later need to go into a
+certain place.  We should think about any resource records that are not explicitly
+assigned to a zone, and how they could be redistributed when a zone is added that
+overlaps such resource records.  It would be helpful if ACL Rules always decide
+on a zone to use, even if that is based on a simple default idea such as a TLD plus
+one more level.  This would not be supportive of subdomains, except when they are
+explicitly configured to produce a zone.
 
 Elementary procedures are needed for:
 
--   Incrementing a Publication Reference Count
-
--   Decrementing a Publication Reference Count
-
--   Checking a Resource Record against an ACL
+-   Processing a Resource Record from a Partial Master
 
 -   Adding a Resource Record
 
@@ -262,50 +252,19 @@ Elementary procedures are needed for:
 These procedures are detailed below, under the assumption that authentication
 has taken place, but not authorisation.
 
-### Incrementing a Publication Reference Count
-
-Psuedocode for adding a resource record `RR`.  This conceals an optimisation with absent
-elements when their value is 0:
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-inc_pubrefcount (RR) {
-    pubrefcount [hash (RR)] += 1;
-    if pubrefcount [hash (RR)] == 1 then
-        output_add_rr (RR);
-    endif
-}
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**TODO:** Not implemented here is what to do with different TTL values under the same
-owner name and resource record type.  The values then need to be aligned, if this is
-not done by later phases of DNS handing.
-
-### Decrementing a Publication Reference Count
-
-Psuedocode for deleting a resource record `RR`.  This conceals an optimisation with absent
-elements when their value is 0:
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-dec_pubrefcount (RR) {
-    if pubrefcount [hash (RR)] == 1 then
-        output_del_rr (RR);
-    endif
-    pubrefcount [hash (RR)] -= 1;
-}
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-### Checking a Resource Record against an ACL
+### Processing a Resource Record from a Partial Master
 
 Pseudocode for checking if the ACL for partial master `PM` accepts resource record `RR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-acl_ok (PM,RR) {
+acl_process (PM,RR) {
+    OUT = list_empty ();
     foreach AR in list_acl (PM) do
-        if acl_match (AR,RR) then
-            return true
-        endif
+        foreach <ZONE_OPT,NEWRR> in acl_rulemap (AR,RR) do
+            list_append (OUT,<ZONE_OPT,NEWRR>);
+        endfor
     endfor
-    return false
+    return OUT
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -315,12 +274,10 @@ Pseudocode acting for a partial master `PM` on a resource record `RR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 add_rr (PM,RR) {
-    if acl_ok (PM,RR) then
-        append_published (PM,RR);
-        inc_pubrefcount (RR);
-    else
-        append_rejected (PM,RR);
-    endif
+    append_input (PM,RR);
+    foreach <ZONE_OPT,NEWRR> in acl_process (PM,RR) do
+        append_output (ZONE_OPT,NEWRR)
+    endfor
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -330,12 +287,10 @@ Pseudocode acting for a partial master `PM` on a resource record `RR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 del_rr (PM,RR) {
-    if acl_ok (PM,RR) then
-        remove_published (PM,RR);
-        dec_pubrefcount (RR);
-    else
-        remove_rejected (PM,RR);
-    endif
+    foreach <ZONE_OPT,OLDRR> in acl_process (PM,RR) do
+        remove_output (ZONE_OPT,OLDRR);
+    done
+    remove_input (PM,RR);
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -345,13 +300,11 @@ Pseudocode acting for a partial master `PM` on an ACL rule `AR`:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 add_acl_rule (PM,AR) {
-    foreach RR in list_rejected (PM) do
-        if acl_match (AR,RR) then
-            remove_rejected (PM,RR);
-            append_published (PM,RR);
-            inc_pubrefcount (RR);
-        endif
-    endfor
+    foreach RR in list_input (PM) do
+        foreach <ZONE_OPT,NEWRR> in acl_rulemap (AR,RR) do
+            append_output (ZONE_OPT,NEWRR);
+        done
+    done
     append_acl (PM,AR);
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -363,20 +316,10 @@ Pseudocode acting for a partial master `PM` on an ACL rule `AR`:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 del_acl_rule (PM,AR) {
     remove_acl (PM,AR);
-    foreach RR in list_accepted (PM) {
-        if acl_match (AR,RR) then
-            drop := true;
-            foreach AR2 in list_acl (PM) do
-                if acl_match (AR2,RR) then
-                    drop := false;
-                endif
-            endfor
-            if drop then
-                dec_pubrefcount (RR);
-                remove_published (PM,RR);
-                append_rejected (PM,RR);
-            endif
-        endif
+    foreach RR in list_input (PM) do
+        foreach <ZONE_OPT,OLDRR> in acl_rulemap (AR,RR) do
+            remove_output (ZONE_OPT,OLDRR);
+        endfor
     endfor
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
