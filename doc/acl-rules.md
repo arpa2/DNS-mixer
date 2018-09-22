@@ -79,6 +79,15 @@ top-level domein, such as `nl` or `co.jp`,
     name example._
     name **._
 
+In other situations, a more localised notion of a zone apex
+and/or `NS` references may be needed for locally defined
+zone apexes; we shall write these as `__` but it is worth
+noting how expensive such rules are; they may all need to be
+recomputed when adding a zone that overlaps another,
+
+    name www.__
+    name **.__
+
 Names may start with a wildcard to match any concrete name supplied
 by the resource record but not the wildcard itself,
 
@@ -116,8 +125,8 @@ application of the ACL Rule mapping and just before matching names
 as part of the application of the ACL Rule).  The label may occur
 in any position, not just at the top.
 Even though `_` as the last label in a name can match one or two labels
-such as for `org` or `co.uk`, it is always counted as one label.
-The notation `*` represents a
+such as for `org` or `co.uk`, and `__` can match several more, both
+of these forms is counted as one label.  The notation `*` represents a
 literal asterisk in the zone data, so it too counts as a single label.
 This is not the case for the `**` label, which may cover multiple levels
 of labels which are then separately counted.
@@ -255,6 +264,13 @@ a need for some related storage, and possibly even inquiries
 into the current DNS state of the parent zone.  Similar
 update-propagating behaviours can also be found in Multicast DNS.
 
+One might be tempted to think that DNSSEC signing could be done
+with this mechanism, but this is not true; DNSSEC requires sets
+of records to come together; resource record sets are signed
+at once, and even more is combined into an `NSEC3` signature.
+There is no need for this application either; plenty of software
+already performs to satisfaction in this arena.
+
 
 ## Integers
 
@@ -377,12 +393,6 @@ A field with an 8-bit length prefix may be described as
 
 In these last cases, the match is against the value of the
 given length, never including the length field.
-
-Integer forms may be used on byte sequences, but they are of
-variable length in this case.  The special form of a lone
-`::` as the mask also translates to all-ones for bit fields.
-The insertion of `::` with other data inserts variable-sized
-zero filling for both mask and value fields.
 
 We can make an exact match against a full byte sequence by
 specifying a desired base64 format starting and ending with

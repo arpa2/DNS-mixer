@@ -50,3 +50,14 @@ DNS mixer:
     as the delivery of the signed output from old and new situation may well
     be setup with a DNS mixer.
 
+Documentation worth reading:
+
+  * [doc/dns-mixer-from-partial-masters.html](Design documentation)
+    explains the overall operation, the data model and generic procedures.
+
+  * [doc/acl-rules.html](ACL Rules)
+    explains what can be done to filter and modify resource records.
+
+  * [doc/min-max-DNS.html](Min/Max DNS)
+    explains how caching can be taken into account to establish certainties.
+

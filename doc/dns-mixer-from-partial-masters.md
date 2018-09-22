@@ -77,8 +77,8 @@ been made of the same output data.  We can do this by producing a multiset
 of resource records in the output stage.  When producing output, multiples
 will be combined into one entry.  We should be exceptionally careful about
 `IXFR` computations, which may only add a resource record when its count
-goes from 0 to >0 instances, and only remove it when its count drops from
->0 back to 0 instances.
+goes from 0 to >0 instances, and only remove it when its count drops from >0
+back to 0 instances.
 
 While producing a set of resource records as output from a zone's multiset,
 differing TTL values for the same owner name and resource record type can
