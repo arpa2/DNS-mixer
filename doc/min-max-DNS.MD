@@ -308,6 +308,191 @@ implementation is possible, without checking if any
 resource records would remain.
 
 
+## Export Quality max(DNS)
+
+The logic based on a latest retraction time suffices for
+the timing of a ACL Rule with `ttl max`, but it does not
+provide enough information to be able to export DNS information
+that represents max(DNS) to external requesters.  Such
+requesters may see sudden drops, without any anticipation
+of when this would happen, and so they are left to polling
+and, when speed is important, doing so at a much higher
+rate than the TTL.  This is not very handy, and a TTL that
+counts down as it does in a cache would be a more useful
+instrument in max(DNS), as it would allow setting a timer
+for a following check.  This timer would run once in a
+TTL and potentially much faster.  Note that the logic of
+`RRSIG` allows lower TTL values than used while signing,
+in support of cached resource records, see
+[Section 3.1.4 of RFC4034](https://tools.ietf.org/html/rfc4034#section-3.1.4).
+
+Now, instead of presenting a resource record as-is even
+if its removal is scheduled, it is possible to use the
+latest retraction timer if it is set.  The number of
+seconds from the query time until the latest retraction
+time suffices to determine a TTL to send out.  When no
+removal is scheduled, the TTL can be sent out as-is;
+removal is then the time when down-counting starts.
+**TODO:** Can we incorporate a safety margin?  It would
+be best not to exceed the previous TTL.
+
+This is not a solution for a drop in TTL for the same
+resource record.  When the old TTL is counted down
+until removal, its low value would overrule other
+resource records with the new TTL, so that is not
+perfect.  Instead, we can decide to count down the TTL
+until the new value was reached.  Similar to the idea
+of counting down to a latest retraction time, we could
+count down to a new TTL value.  This can be integrated
+with the retraction time by setting the new TTL value
+to 0 and speaking of a latest countdown time to reach
+a TTL.  Removal is possible when zero is reached.  (A
+remaining fine point might be the distinction from a
+resource record that is published with TTL 0, which
+should not be the result of counting down but then
+again it is also not meant for caching.  Dropping a
+TTL from a higher value to 0 is certainly silly.)
+
+When a drop to an even lower TTL follows the previous
+one, then the new TTL may be set with another TTL and
+corresponding latest countdown time, but the speed of
+counting down the original records does not go up, so
+it's all part of the same line going down.
+
+We do not need to count gradually when incrementing a
+TTL value.  A higher value for the TTL should be set
+immediately, to reflect that some caches might find it
+right away.  When a resource record is counting down
+to a lower TTL, we should look at its currently
+reported TTL instead of the TTL field itself, and if
+the new TTL is at least as high it should be set
+immediately and the countdown stopped.  When the
+countdown works towards a lower TTL but it has not
+dropped as far yet as the newly proposed TTL value,
+then the countdown should be modified to stop when
+the proposed new TTL is reached.
+
+The result is that we can compute the maximum TTL
+that a resource record could have in some cache
+somewhere, and this means that we can predict when
+cache entries for the resource record expire.  The
+resulting time is a perfect time for polling a
+max(TTL) name server once more, to see if the state
+of DNS has changed or that we can proceed under the
+assurance that nodody is still using the requested
+resource record.
+
+The TTL computations in max(TTL) are made for each
+resource record individually.  When adding or
+removing, this can lead to variations in TTL within
+a resource record set as published by max(TTL).
+Even if this is deprecated behaviour in Current DNS
+for lack of application, it is the most informative
+that max(DNS) can be and should not be overruled for
+its output.
+
+
+## Export Quality min(DNS)
+
+The purpose of min(DNS) is to test if certain
+resource records are available everywhere.  This
+means that the value of the TTL is not important;
+we are not waiting for the information to disappear
+and we need to do no polling when something appears
+in min(DNS).
+
+Setting the lowest TTL may sound like it provides
+useful information, and could help polling such as
+for monitoring, but this is actually wrong.  As
+soon as Current DNS drops a resource record, it
+also drops out of min(DNS).  So the only safe TTL
+for min(DNS) would be zero, which is intended for
+the reporting of information that must not be
+cached.
+
+With that in mind, the setting of a
+latest introduction time is sufficient for the
+behaviour of min(DNS) to be of export quality.
+Removal of a resource record from a min(DNS) flow
+should of course be immediate.  When one
+integrated administration is used this may require
+a flag to be added to indicate that a record has
+been removed.  This also resolves the question on
+what to do when a counting-down zone reaches 0
+in the most stable manner possible.
+
+## Export Quality Operations with min/max(DNS)
+
+The refined max/min(DNS) model calls for different
+procedures to process `IXFR` changes.  In fact, we
+can store more information and might find a simpler
+model.  We now store the following alongside a
+resource record:
+
+  * A time of latest introduction
+  * A TTL value, or the target of optional countdown
+  * An optional time at which TTL countdown finishes
+  * A flag to indicate removal from authoritatives
+
+For normal DNS service, we would only show resource
+records that have no removal flag, and we would use
+the TTL value as set, because that is actually the
+authoritative TTL value, even if max(TTL) intends to
+be clever around it.  This TTL value may therefore
+be set in the resource record itself.
+
+Only the operations that have changed are presented
+below; the others remain unchanged.
+
+### Changing the TTL of a Resource Record Set
+
+The change of a TTL on a resource record set is the
+most interesting refinement to make with the new
+data being stored.  We are going to iterate over
+independent resource records.
+
+Some resource records may be added or dropped in
+an `IXFR`; there are procedures for that below.
+Other resources records will not change, except
+for their TTL.  This is of no impact on min(DNS)
+but it does influence max(DNS).  In other words,
+we should follow the rules for Export Quality
+for max(DNS), leading to possible updates of the
+TTL value and the optional TTL countdown time.
+
+This demonstrates that the new data gives a finer
+representation than before, where we resorted to
+the removal of a resource record and the introduction
+of another.  Though this worked for internal use, it
+might send off more signals than desired.
+
+### Removing from a Resource Record Set
+
+To remove a resource record from a set, its deletion
+flag is set.  Historic records may still exist with
+this flag set, but those should be skipped, to avoid
+problems when resource records are flapping.
+
+To handle max(DNS), we count down from the TTL to 0,
+so we set the TTL to 0 and countdown end time to the
+current time plus the previous TTL value.  If a
+countdown was already in progress, we should instead
+add the old TTL to the already-set countdown time and
+then set the TTL to 0.
+
+Current DNS and min(DNS) will stop servicing the
+resource record immediately; max(DNS) will continue
+to serve it until the TTL reaches 0, at which time
+the deleted flag states that it is up for removal.
+
+### Retracting a Resource Record Set
+
+The removal of a resource record set consists just of
+the removal of the individual resource records in it.
+This is a pleasant change; we have no need to see if
+resource records remain if an `IXFR` orders removal of
+some.
+
 
 ## Example
 
